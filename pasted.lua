@@ -275,6 +275,329 @@ applyRerun(State.ReRunAfterTeleport == true)
 
 local loaded, ready, reason = pcall(awaitRivals)
 
+local CollectionService = game:GetService("CollectionService")
+
+local function requireFrom(parent, ...)
+	if not parent then
+		return nil
+	end
+
+	local node = parent
+
+	for index = 1, select("#", ...) do
+		node = node:FindFirstChild(select(index, ...))
+
+		if not node then
+			return nil
+		end
+	end
+
+	local ok, result = pcall(require, node)
+
+	if ok then
+		return result
+	end
+
+	return nil
+end
+
+local localPlayer = Players.LocalPlayer
+local playerScripts = localPlayer and localPlayer:FindFirstChild("PlayerScripts")
+local controllers = playerScripts and playerScripts:FindFirstChild("Controllers")
+local clientModules = playerScripts and playerScripts:FindFirstChild("Modules")
+local userInterface = clientModules and clientModules:FindFirstChild("UserInterface")
+local sharedModules = ReplicatedStorage:FindFirstChild("Modules")
+local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+local replication = remotes and remotes:FindFirstChild("Replication")
+local fighterRemotes = replication and replication:FindFirstChild("Fighter")
+
+local Rivals = {
+	MatchmakingController = requireFrom(controllers, "MatchmakingController"),
+	FighterController = requireFrom(controllers, "FighterController"),
+	ItemLibrary = requireFrom(sharedModules, "ItemLibrary"),
+	DuelLibrary = requireFrom(sharedModules, "DuelLibrary"),
+	Constants = requireFrom(sharedModules, "CONSTANTS"),
+	Pages = requireFrom(userInterface, "Pages"),
+	PickWeaponsRemote = fighterRemotes and fighterRemotes:FindFirstChild("PickWeapons"),
+	UseItemRemote = fighterRemotes and fighterRemotes:FindFirstChild("UseItem"),
+}
+
+local Settings = {
+	AutoQueue = State.AutoQueue or { Enabled = false, Queue = "1v1" },
+	AutoLoadout = State.AutoLoadout or { Enabled = false, Slots = {} },
+	AntiKatana = State.AntiKatana or { Enabled = false },
+	SubspaceTripmines = State.SubspaceTripmines or { AutoTrigger = false, TeamTrigger = false },
+}
+
+for name, value in pairs(Settings) do
+	State[name] = value
+end
+
+if type(Settings.AutoLoadout.Slots) ~= "table" then
+	Settings.AutoLoadout.Slots = {}
+end
+
+local firetouchinterest = firetouchinterest or function() end
+
+local function localHitboxBody()
+	local character = Players.LocalPlayer.Character
+
+	if character then
+		return character:FindFirstChild("HitboxBody")
+	end
+
+	return nil
+end
+
+local function localEnvironmentId()
+	local character = Players.LocalPlayer.Character
+
+	if character then
+		local value = character:GetAttribute("EnvironmentID") or character:GetAttribute("EnvironmentId")
+
+		if value ~= nil then
+			return value
+		end
+	end
+
+	return Players.LocalPlayer:GetAttribute("EnvironmentID") or Players.LocalPlayer:GetAttribute("EnvironmentId")
+end
+
+local function tripmineBelongsToTeam(hitbox)
+	if hitbox:GetAttribute("PlacedByUserID") == Players.LocalPlayer.UserId then
+		return true
+	end
+
+	local teamId = hitbox:GetAttribute("TeamID")
+	local myTeamId = Players.LocalPlayer:GetAttribute("TeamID") or Players.LocalPlayer:GetAttribute("TeamId")
+
+	return teamId ~= nil and myTeamId ~= nil and teamId == myTeamId
+end
+
+local function triggerTripmines()
+	if not Settings.SubspaceTripmines.AutoTrigger then
+		return
+	end
+
+	local body = localHitboxBody()
+
+	if not body then
+		return
+	end
+
+	local environment = localEnvironmentId()
+
+	for _, hitbox in ipairs(CollectionService:GetTagged("SubspaceTripmine")) do
+		if hitbox:IsA("BasePart") then
+			local teamMine = tripmineBelongsToTeam(hitbox)
+			local environmentMatches = environment == nil or hitbox:GetAttribute("EnvironmentID") == environment
+
+			if environmentMatches and (Settings.SubspaceTripmines.TeamTrigger or not teamMine) then
+				firetouchinterest(hitbox, body, 0)
+				firetouchinterest(hitbox, body, 1)
+			end
+		end
+	end
+end
+
+task.spawn(function()
+	while true do
+		pcall(triggerTripmines)
+		task.wait(0.15)
+	end
+end)
+
+local queueToken = 0
+
+local function queueNames()
+	local options = {}
+	local library = Rivals.DuelLibrary
+
+	if type(library) == "table" then
+		local queues = library.MatchmakingQueues
+
+		if type(queues) == "table" then
+			for _, name in ipairs(library.MatchmakingQueueOrder or {}) do
+				if queues[name] ~= nil then
+					table.insert(options, name)
+				end
+			end
+		end
+
+		for _, name in ipairs(library.ArcadeModeOrder or {}) do
+			table.insert(options, name)
+		end
+	end
+
+	if #options == 0 then
+		options = { "1v1", "2v2", "3v3", "4v4" }
+	end
+
+	return options
+end
+
+local function applyAutoQueue()
+	queueToken = queueToken + 1
+
+	local controller = Rivals.MatchmakingController
+
+	if not Settings.AutoQueue.Enabled or type(controller) ~= "table" or typeof(controller.QueueInto) ~= "function" then
+		return
+	end
+
+	local token = queueToken
+
+	task.spawn(function()
+		while Settings.AutoQueue.Enabled and token == queueToken do
+			if Players.LocalPlayer.Character ~= nil then
+				pcall(controller.QueueInto, controller, Settings.AutoQueue.Queue)
+			end
+
+			task.wait(5)
+		end
+	end)
+end
+
+local loadoutSlots = {
+	{ Name = "Primary", Class = "Primary" },
+	{ Name = "Secondary", Class = "Secondary" },
+	{ Name = "Melee", Class = "Melee" },
+	{ Name = "Utility", Class = "Utility" },
+}
+
+local function itemOptions(class)
+	local options = { "Unselected" }
+	local library = Rivals.ItemLibrary
+
+	if type(library) == "table" and type(library.Items) == "table" then
+		for name, item in pairs(library.Items) do
+			if name ~= "MISSING_WEAPON" and type(item) == "table" and item.Class == class then
+				table.insert(options, name)
+			end
+		end
+
+		table.sort(options, function(left, right)
+			if left == "Unselected" then
+				return true
+			end
+
+			if right == "Unselected" then
+				return false
+			end
+
+			return left < right
+		end)
+	end
+
+	return options
+end
+
+local lastLoadoutPick = 0
+
+local function applyAutoLoadout()
+	if not Settings.AutoLoadout.Enabled or os.clock() - lastLoadoutPick < 1 then
+		return
+	end
+
+	local remote = Rivals.PickWeaponsRemote
+
+	if not remote then
+		return
+	end
+
+	lastLoadoutPick = os.clock()
+
+	local constants = Rivals.Constants
+	local defaults = type(constants) == "table" and constants.DEFAULT_WEAPONS or nil
+	local payload = {}
+
+	for index, slot in ipairs(loadoutSlots) do
+		local chosen = Settings.AutoLoadout.Slots[slot.Name]
+
+		if chosen == nil or chosen == "Unselected" then
+			chosen = defaults and defaults[index]
+		end
+
+		payload[index] = chosen
+	end
+
+	pcall(function()
+		remote:FireServer(payload)
+	end)
+end
+
+local pages = Rivals.Pages
+local pageSystem = type(pages) == "table" and pages.PageSystem or nil
+local pageOpened = type(pageSystem) == "table" and pageSystem.PageOpened or nil
+
+if pageOpened and typeof(pageOpened.Connect) == "function" then
+	pageOpened:Connect(function(page)
+		local name = page and page.Name
+
+		if typeof(name) == "string" and string.sub(name, 1, 11) == "PickWeapons" then
+			applyAutoLoadout()
+		end
+	end)
+end
+
+local function targetIsShielded()
+	local controller = Rivals.FighterController
+
+	if type(controller) ~= "table" then
+		return false
+	end
+
+	local fighters = controller._player_to_fighter
+
+	if type(fighters) ~= "table" then
+		return false
+	end
+
+	for player, fighter in pairs(fighters) do
+		if player ~= Players.LocalPlayer and fighter and fighter.IsEnemy == true then
+			local observer = fighter.ItemObserver
+
+			if observer and typeof(observer.EquippedItemAsMelee) == "function" then
+				local ok, melee = pcall(observer.EquippedItemAsMelee, observer)
+
+				if ok and melee and typeof(melee.IsDeflecting) == "function" then
+					local ok2, deflecting = pcall(melee.IsDeflecting, melee)
+
+					if ok2 and deflecting == true then
+						return true
+					end
+				end
+			end
+		end
+	end
+
+	return false
+end
+
+if typeof(hookmetamethod) == "function" and typeof(getnamecallmethod) == "function" then
+	pcall(function()
+		local originalNamecall
+
+		originalNamecall = hookmetamethod(game, "__namecall", function(...)
+			local self = ...
+
+			if self == Rivals.UseItemRemote and Settings.AntiKatana.Enabled and getnamecallmethod() == "FireServer" then
+				local ok, shielded = pcall(targetIsShielded)
+
+				if ok and shielded then
+					return
+				end
+			end
+
+			return originalNamecall(...)
+		end)
+	end)
+end
+
+if Settings.AutoQueue.Enabled then
+	applyAutoQueue()
+end
+
 local Window = Library:CreateWindow({
 	Title = "Script Menu",
 	Footer = "v1.0",
@@ -318,6 +641,106 @@ StartupGroup:AddToggle("ReRunAfterTeleport", {
 		else
 			applyRerun(value)
 		end
+	end,
+})
+
+local MiscTab = Tabs.Misc
+local queueOptions = queueNames()
+local queueDefault = Settings.AutoQueue.Queue
+
+if not table.find(queueOptions, queueDefault) then
+	queueDefault = queueOptions[1]
+	Settings.AutoQueue.Queue = queueDefault
+end
+
+local AutoQueueGroup = MiscTab:AddLeftGroupbox("Auto Queue", "users")
+
+AutoQueueGroup:AddToggle("AutoQueueEnabled", {
+	Text = "Enabled",
+	Default = Settings.AutoQueue.Enabled,
+	Tooltip = "Automatically joins your selected queue whenever you are sitting in the lobby.",
+	Callback = function(value)
+		Settings.AutoQueue.Enabled = value
+		saveState(State)
+		applyAutoQueue()
+	end,
+})
+
+AutoQueueGroup:AddDropdown("AutoQueueQueue", {
+	Text = "Queue",
+	Values = queueOptions,
+	Default = queueDefault,
+	Callback = function(value)
+		Settings.AutoQueue.Queue = value
+		saveState(State)
+		applyAutoQueue()
+	end,
+})
+
+local AutoLoadoutGroup = MiscTab:AddLeftGroupbox("Auto Loadout", "package")
+
+AutoLoadoutGroup:AddToggle("AutoLoadoutEnabled", {
+	Text = "Enabled",
+	Default = Settings.AutoLoadout.Enabled,
+	Tooltip = "Picks your saved loadout automatically at the weapon selection screen.",
+	Callback = function(value)
+		Settings.AutoLoadout.Enabled = value
+		saveState(State)
+	end,
+})
+
+for _, slot in ipairs(loadoutSlots) do
+	local options = itemOptions(slot.Class)
+	local current = Settings.AutoLoadout.Slots[slot.Name]
+
+	if current == nil or not table.find(options, current) then
+		current = "Unselected"
+		Settings.AutoLoadout.Slots[slot.Name] = current
+	end
+
+	AutoLoadoutGroup:AddDropdown("AutoLoadout" .. slot.Name, {
+		Text = slot.Name,
+		Values = options,
+		Default = current,
+		Searchable = true,
+		Callback = function(value)
+			Settings.AutoLoadout.Slots[slot.Name] = value
+			saveState(State)
+		end,
+	})
+end
+
+local AntiKatanaGroup = MiscTab:AddRightGroupbox("Anti Katana", "shield")
+
+AntiKatanaGroup:AddToggle("AntiKatanaEnabled", {
+	Text = "Enabled",
+	Default = Settings.AntiKatana.Enabled,
+	Tooltip = "Blocks your gun shots at enemies who are deflecting or front-blocking.",
+	Callback = function(value)
+		Settings.AntiKatana.Enabled = value
+		saveState(State)
+	end,
+})
+
+local TripminesGroup = MiscTab:AddRightGroupbox("Subspace Tripmines", "bomb")
+
+TripminesGroup:AddToggle("TripmineAutoTrigger", {
+	Text = "Auto Trigger",
+	Default = Settings.SubspaceTripmines.AutoTrigger,
+	Tooltip = "Detonates enemy subspace tripmines automatically.",
+	Callback = function(value)
+		Settings.SubspaceTripmines.AutoTrigger = value
+		saveState(State)
+	end,
+})
+
+TripminesGroup:AddToggle("TripmineTeamTrigger", {
+	Text = "Team Trigger",
+	Default = Settings.SubspaceTripmines.TeamTrigger,
+	Tooltip = "Also detonates tripmines placed by your own team.",
+	Callback = function(value)
+		Settings.SubspaceTripmines.TeamTrigger = value
+		saveState(State)
 	end,
 })
 
