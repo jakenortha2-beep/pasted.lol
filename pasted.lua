@@ -7,7 +7,7 @@ local HttpService = game:GetService("HttpService")
 
 local Toggles = Library.Toggles
 
-local SCRIPT_URL = "https://raw.githubusercontent.com/jakenortha2-beep/pasted.lol/refs/heads/main/main.lua"
+local SCRIPT_URL = "https://raw.githubusercontent.com/jakenortha2-beep/pasted.lol/refs/heads/main/pasted.lua"
 
 local StateFolder = "ScriptMenu"
 local StateFile = StateFolder .. "/state.json"
