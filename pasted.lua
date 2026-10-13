@@ -98,37 +98,19 @@ local function saveState(state)
 end
 
 local function resolveQueueOnTeleport()
-	local direct = queue_on_teleport
+	local candidates = {
+		queue_on_teleport,
+		queueonteleport,
+		getgenv().queue_on_teleport,
+		getgenv().queueonteleport,
+		syn and syn.queue_on_teleport,
+		fluxus and fluxus.queue_on_teleport,
+		Krnl and Krnl.queue_on_teleport,
+	}
 
-	if typeof(direct) == "function" then
-		return direct
-	end
-
-	local fn
-
-	local names = { "queue_on_teleport", "queueonteleport" }
-
-	for _, name in ipairs(names) do
-		pcall(function()
-			fn = getgenv()[name]
-		end)
-
-		if typeof(fn) == "function" then
-			return fn
-		end
-	end
-
-	local hubs = { syn, fluxus, securecall, Krnl }
-
-	for _, hub in ipairs(hubs) do
-		if hub then
-			pcall(function()
-				fn = hub.queue_on_teleport
-			end)
-
-			if typeof(fn) == "function" then
-				return fn
-			end
+	for _, candidate in ipairs(candidates) do
+		if typeof(candidate) == "function" then
+			return candidate
 		end
 	end
 
@@ -268,21 +250,12 @@ local function awaitRivals()
 		return false, "ClientReplicatedClasses.ClientFighter"
 	end
 
-	local hitboxDeadline = math.min(deadline, os.clock() + 3)
-
-	if not findChild(character, "HitboxHead", hitboxDeadline) then
-		warn("[Script] Character combat hitboxes are still loading.")
-	end
-
 	return true
 end
 
 local QueueOnTeleport = resolveQueueOnTeleport()
 
-local RERUN_CODE = string.format(
-	"local ok, err = pcall(function() loadstring(game:HttpGet(%q))() end) if not ok then warn('[Rerun] ' .. tostring(err)) end",
-	SCRIPT_URL
-)
+local RERUN_CODE = string.format("pcall(function() loadstring(game:HttpGet(%q))() end)", SCRIPT_URL)
 
 local function applyRerun(enabled)
 	if not QueueOnTeleport then
@@ -300,8 +273,7 @@ local State = loadState()
 
 applyRerun(State.ReRunAfterTeleport == true)
 
-local readyOk, readyResult, readyReason = pcall(awaitRivals)
-local ready = readyOk and readyResult == true
+local loaded, ready, reason = pcall(awaitRivals)
 
 local Window = Library:CreateWindow({
 	Title = "Script Menu",
@@ -349,12 +321,9 @@ StartupGroup:AddToggle("ReRunAfterTeleport", {
 	end,
 })
 
-if not ready then
-	local detail = readyOk and readyReason or readyResult
+if not loaded or not ready then
+	local detail = loaded and reason or ready
 	Library:Notify("Rivals was not fully loaded in time on: " .. tostring(detail), 6)
-	warn("[Script] Rivals readiness check failed on: " .. tostring(detail))
-else
-	print("[Script] Rivals modules, controllers and remotes are fully loaded.")
 end
 
 if Toggles.SilentLoad.Value ~= true then
