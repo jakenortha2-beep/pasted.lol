@@ -4,6 +4,8 @@ local Library = loadstring(game:HttpGet(repo .. "Library.lua"))()
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local HttpService = game:GetService("HttpService")
+local Lighting = game:GetService("Lighting")
+local RunService = game:GetService("RunService")
 
 local Toggles = Library.Toggles
 
@@ -96,6 +98,60 @@ local function saveState(state)
 		end
 	end
 end
+
+local function colorToTable(color)
+	return { math.round(color.R * 255), math.round(color.G * 255), math.round(color.B * 255) }
+end
+
+local function tableToColor(value, fallback)
+	if type(value) == "table" then
+		return Color3.fromRGB(value[1] or 255, value[2] or 255, value[3] or 255)
+	end
+
+	return fallback or Color3.new(1, 1, 1)
+end
+
+local function withDefaults(saved, defaults)
+	local result = {}
+
+	for key, value in pairs(defaults) do
+		result[key] = value
+	end
+
+	if type(saved) == "table" then
+		for key, value in pairs(saved) do
+			result[key] = value
+		end
+	end
+
+	return result
+end
+
+local WorldColorDefaults = {
+	Enabled = false,
+	Ambient = { 128, 128, 128 },
+	ClockTime = 14,
+	Brightness = 2,
+	Fog = { 192, 192, 192 },
+	FogEnd = 5000,
+	Exposure = 0,
+	Saturation = 0,
+	Tint = { 255, 255, 255 },
+}
+
+local SkyboxDefaults = {
+	Enabled = false,
+	Preset = "None",
+}
+
+local WeatherDefaults = {
+	Enabled = false,
+	Preset = "Rain",
+	Intensity = 1,
+	Color = { 255, 255, 255 },
+}
+
+local WEATHER_OPTIONS = { "Rain", "Snow" }
 
 local function resolveQueueOnTeleport()
 	local candidates = {
@@ -327,6 +383,9 @@ local Settings = {
 	AutoLoadout = State.AutoLoadout or { Enabled = false, Slots = {} },
 	AntiKatana = State.AntiKatana or { Enabled = false },
 	SubspaceTripmines = State.SubspaceTripmines or { AutoTrigger = false, TeamTrigger = false },
+	WorldColor = withDefaults(State.WorldColor, WorldColorDefaults),
+	Skybox = withDefaults(State.Skybox, SkyboxDefaults),
+	Weather = withDefaults(State.Weather, WeatherDefaults),
 }
 
 for name, value in pairs(Settings) do
@@ -335,6 +394,10 @@ end
 
 if type(Settings.AutoLoadout.Slots) ~= "table" then
 	Settings.AutoLoadout.Slots = {}
+end
+
+if not table.find(WEATHER_OPTIONS, Settings.Weather.Preset) then
+	Settings.Weather.Preset = WEATHER_OPTIONS[1]
 end
 
 local firetouchinterest = firetouchinterest or function() end
@@ -594,6 +657,409 @@ if typeof(hookmetamethod) == "function" and typeof(getnamecallmethod) == "functi
 	end)
 end
 
+local worldColorOriginal = nil
+
+local function captureWorldColor()
+	if worldColorOriginal then
+		return
+	end
+
+	worldColorOriginal = {
+		Ambient = Lighting.Ambient,
+		OutdoorAmbient = Lighting.OutdoorAmbient,
+		ClockTime = Lighting.ClockTime,
+		Brightness = Lighting.Brightness,
+		FogColor = Lighting.FogColor,
+		FogEnd = Lighting.FogEnd,
+		ExposureCompensation = Lighting.ExposureCompensation,
+		ColorShiftTop = Lighting.ColorShift_Top,
+		ColorShiftBottom = Lighting.ColorShift_Bottom,
+	}
+end
+
+local function restoreWorldColor()
+	local effect = Lighting:FindFirstChild("ScriptMenuColorCorrection")
+
+	if effect then
+		effect:Destroy()
+	end
+
+	if not worldColorOriginal then
+		return
+	end
+
+	Lighting.Ambient = worldColorOriginal.Ambient
+	Lighting.OutdoorAmbient = worldColorOriginal.OutdoorAmbient
+	Lighting.ClockTime = worldColorOriginal.ClockTime
+	Lighting.Brightness = worldColorOriginal.Brightness
+	Lighting.FogColor = worldColorOriginal.FogColor
+	Lighting.FogEnd = worldColorOriginal.FogEnd
+	Lighting.ExposureCompensation = worldColorOriginal.ExposureCompensation
+	Lighting.ColorShift_Top = worldColorOriginal.ColorShiftTop
+	Lighting.ColorShift_Bottom = worldColorOriginal.ColorShiftBottom
+
+	worldColorOriginal = nil
+end
+
+local function applyWorldColor()
+	local settings = Settings.WorldColor
+
+	if not settings.Enabled then
+		restoreWorldColor()
+		return
+	end
+
+	captureWorldColor()
+
+	local ambient = tableToColor(settings.Ambient, Color3.fromRGB(128, 128, 128))
+
+	Lighting.Ambient = ambient
+	Lighting.OutdoorAmbient = ambient
+	Lighting.ClockTime = math.clamp(tonumber(settings.ClockTime) or 14, 0, 24)
+	Lighting.Brightness = math.clamp(tonumber(settings.Brightness) or 2, 0, 10)
+	Lighting.FogColor = tableToColor(settings.Fog, Color3.fromRGB(192, 192, 192))
+	Lighting.FogEnd = math.max(tonumber(settings.FogEnd) or 5000, 1)
+	Lighting.ExposureCompensation = math.clamp(tonumber(settings.Exposure) or 0, -5, 5)
+
+	local effect = Lighting:FindFirstChild("ScriptMenuColorCorrection")
+
+	if not effect then
+		effect = Instance.new("ColorCorrectionEffect")
+		effect.Name = "ScriptMenuColorCorrection"
+		effect.Parent = Lighting
+	end
+
+	effect.TintColor = tableToColor(settings.Tint, Color3.new(1, 1, 1))
+	effect.Saturation = math.clamp(tonumber(settings.Saturation) or 0, -1, 1)
+end
+
+local SKYBOX_PRESETS = {
+	["Classic Blue"] = {
+		SkyboxBk = "rbxassetid://135483466",
+		SkyboxDn = "rbxassetid://135483484",
+		SkyboxFt = "rbxassetid://135483461",
+		SkyboxLf = "rbxassetid://135483495",
+		SkyboxRt = "rbxassetid://135483499",
+		SkyboxUp = "rbxassetid://135483475",
+		StarCount = 0,
+		CelestialBodiesShown = true,
+	},
+	Sunset = {
+		SkyboxBk = "rbxassetid://323494035",
+		SkyboxDn = "rbxassetid://323494368",
+		SkyboxFt = "rbxassetid://323494130",
+		SkyboxLf = "rbxassetid://323494252",
+		SkyboxRt = "rbxassetid://323494067",
+		SkyboxUp = "rbxassetid://323493360",
+		StarCount = 0,
+		CelestialBodiesShown = true,
+	},
+	["Red Night"] = {
+		SkyboxBk = "rbxassetid://401664839",
+		SkyboxDn = "rbxassetid://401664862",
+		SkyboxFt = "rbxassetid://401664960",
+		SkyboxLf = "rbxassetid://401664881",
+		SkyboxRt = "rbxassetid://401664901",
+		SkyboxUp = "rbxassetid://401664936",
+		StarCount = 0,
+		CelestialBodiesShown = true,
+	},
+	Galaxy = {
+		SkyboxBk = "rbxassetid://159454299",
+		SkyboxDn = "rbxassetid://159454296",
+		SkyboxFt = "rbxassetid://159454293",
+		SkyboxLf = "rbxassetid://159454286",
+		SkyboxRt = "rbxassetid://159454300",
+		SkyboxUp = "rbxassetid://159454288",
+		StarCount = 3000,
+		CelestialBodiesShown = true,
+	},
+	Vaporwave = {
+		SkyboxBk = "rbxassetid://8631780182",
+		SkyboxDn = "rbxassetid://8631784904",
+		SkyboxFt = "rbxassetid://8631769834",
+		SkyboxLf = "rbxassetid://8631777199",
+		SkyboxRt = "rbxassetid://8631735555",
+		SkyboxUp = "rbxassetid://8631782345",
+		StarCount = 0,
+		CelestialBodiesShown = false,
+	},
+	["Pink Morning"] = {
+		SkyboxBk = "rbxassetid://12635309703",
+		SkyboxDn = "rbxassetid://12635311686",
+		SkyboxFt = "rbxassetid://12635312870",
+		SkyboxLf = "rbxassetid://12635313718",
+		SkyboxRt = "rbxassetid://12635315817",
+		SkyboxUp = "rbxassetid://12635316856",
+		StarCount = 0,
+		CelestialBodiesShown = true,
+	},
+	["Deep Space"] = {
+		SkyboxBk = "rbxassetid://159248188",
+		SkyboxDn = "rbxassetid://159248183",
+		SkyboxFt = "rbxassetid://159248187",
+		SkyboxLf = "rbxassetid://159248173",
+		SkyboxRt = "rbxassetid://159248192",
+		SkyboxUp = "rbxassetid://159248176",
+		StarCount = 0,
+		CelestialBodiesShown = true,
+	},
+	Winter = {
+		SkyboxBk = "rbxassetid://510645155",
+		SkyboxDn = "rbxassetid://510645130",
+		SkyboxFt = "rbxassetid://510645179",
+		SkyboxLf = "rbxassetid://510645117",
+		SkyboxRt = "rbxassetid://510645146",
+		SkyboxUp = "rbxassetid://510645195",
+		StarCount = 0,
+		CelestialBodiesShown = true,
+	},
+	["Clouded Sky"] = {
+		SkyboxBk = "rbxassetid://252760981",
+		SkyboxDn = "rbxassetid://252763035",
+		SkyboxFt = "rbxassetid://252761439",
+		SkyboxLf = "rbxassetid://252760980",
+		SkyboxRt = "rbxassetid://252760986",
+		SkyboxUp = "rbxassetid://252762652",
+		StarCount = 0,
+		CelestialBodiesShown = false,
+	},
+	["Golden Warm"] = {
+		SkyboxBk = "rbxassetid://162001887",
+		SkyboxDn = "rbxassetid://161998893",
+		SkyboxFt = "rbxassetid://162001897",
+		SkyboxLf = "rbxassetid://162001904",
+		SkyboxRt = "rbxassetid://162001919",
+		SkyboxUp = "rbxassetid://162001926",
+		StarCount = 0,
+		CelestialBodiesShown = true,
+	},
+	["Starry Night"] = {
+		SkyboxBk = "rbxassetid://15536110634",
+		SkyboxDn = "rbxassetid://15536112543",
+		SkyboxFt = "rbxassetid://15536116141",
+		SkyboxLf = "rbxassetid://15536114370",
+		SkyboxRt = "rbxassetid://15536118762",
+		SkyboxUp = "rbxassetid://15536117282",
+		SunTextureId = "rbxassetid://4547507884",
+		MoonTextureId = "rbxassetid://6196665106",
+		StarCount = 3000,
+		CelestialBodiesShown = true,
+	},
+	Midnight = {
+		SkyboxBk = "rbxassetid://6444884337",
+		SkyboxDn = "rbxassetid://6444884785",
+		SkyboxFt = "rbxassetid://6444884337",
+		SkyboxLf = "rbxassetid://6444884337",
+		SkyboxRt = "rbxassetid://6444884337",
+		SkyboxUp = "rbxassetid://6412503613",
+		StarCount = 3000,
+		CelestialBodiesShown = true,
+	},
+}
+
+local SKYBOX_OPTIONS = { "None", "Classic Blue", "Sunset", "Red Night", "Galaxy", "Vaporwave", "Pink Morning", "Deep Space", "Winter", "Clouded Sky", "Golden Warm", "Starry Night", "Midnight" }
+
+local hiddenSkies = {}
+
+local function hideExistingSkies()
+	if #hiddenSkies > 0 then
+		return
+	end
+
+	for _, child in ipairs(Lighting:GetChildren()) do
+		if child:IsA("Sky") and child.Name ~= "ScriptMenuSky" then
+			table.insert(hiddenSkies, { instance = child, parent = child.Parent })
+			child.Parent = nil
+		end
+	end
+end
+
+local function restoreExistingSkies()
+	for _, entry in ipairs(hiddenSkies) do
+		if entry.instance and entry.instance.Parent == nil then
+			entry.instance.Parent = entry.parent or Lighting
+		end
+	end
+
+	table.clear(hiddenSkies)
+end
+
+local function applySkybox()
+	local existing = Lighting:FindFirstChild("ScriptMenuSky")
+
+	if existing then
+		existing:Destroy()
+	end
+
+	restoreExistingSkies()
+
+	local settings = Settings.Skybox
+
+	if not settings.Enabled then
+		return
+	end
+
+	local preset = SKYBOX_PRESETS[settings.Preset]
+
+	if not preset then
+		return
+	end
+
+	hideExistingSkies()
+
+	local sky = Instance.new("Sky")
+	sky.Name = "ScriptMenuSky"
+
+	for property, value in pairs(preset) do
+		pcall(function()
+			sky[property] = value
+		end)
+	end
+
+	sky.Parent = Lighting
+end
+
+local WEATHER_PRESETS = {
+	Rain = {
+		Height = 45,
+		Rate = 600,
+		Texture = "rbxasset://textures/particles/smoke_main.dds",
+		Lifetime = NumberRange.new(1.2, 1.8),
+		Speed = NumberRange.new(70, 90),
+		Size = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 0.14),
+			NumberSequenceKeypoint.new(1, 0.1),
+		}),
+		Transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 0.4),
+			NumberSequenceKeypoint.new(1, 0.35),
+		}),
+		Acceleration = Vector3.new(0, -40, 0),
+		SpreadAngle = Vector2.new(0, 0),
+		Orientation = Enum.ParticleOrientation.VelocityParallel,
+		Rotation = NumberRange.new(0, 0),
+		RotSpeed = NumberRange.new(0, 0),
+	},
+	Snow = {
+		Height = 50,
+		Rate = 220,
+		Texture = "rbxasset://textures/particles/smoke_main.dds",
+		Lifetime = NumberRange.new(6, 9),
+		Speed = NumberRange.new(6, 10),
+		Size = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 0.35),
+			NumberSequenceKeypoint.new(1, 0.25),
+		}),
+		Transparency = NumberSequence.new(0.15),
+		Acceleration = Vector3.new(0, -1, 0),
+		SpreadAngle = Vector2.new(15, 15),
+		Orientation = Enum.ParticleOrientation.FacingCamera,
+		Rotation = NumberRange.new(0, 360),
+		RotSpeed = NumberRange.new(-40, 40),
+	},
+}
+
+local weatherRig = {
+	part = nil,
+	emitter = nil,
+	connection = nil,
+	height = 45,
+}
+
+local function updateWeatherTransform()
+	local part = weatherRig.part
+
+	if not part then
+		return
+	end
+
+	local camera = workspace.CurrentCamera
+
+	if not camera then
+		return
+	end
+
+	part.CFrame = CFrame.new(camera.CFrame.Position + Vector3.new(0, weatherRig.height, 0))
+end
+
+local function stopWeather()
+	if weatherRig.connection then
+		weatherRig.connection:Disconnect()
+		weatherRig.connection = nil
+	end
+
+	if weatherRig.part then
+		weatherRig.part:Destroy()
+		weatherRig.part = nil
+	end
+
+	weatherRig.emitter = nil
+end
+
+local function applyWeather()
+	local settings = Settings.Weather
+	local spec = WEATHER_PRESETS[settings.Preset]
+
+	if not settings.Enabled or not spec then
+		stopWeather()
+		return
+	end
+
+	if not weatherRig.part then
+		local part = Instance.new("Part")
+		part.Name = "ScriptMenuWeather"
+		part.Anchored = true
+		part.CanCollide = false
+		part.CanQuery = false
+		part.CanTouch = false
+		part.CastShadow = false
+		part.Transparency = 1
+		part.Size = Vector3.new(180, 1, 180)
+		part.Parent = workspace
+
+		local emitter = Instance.new("ParticleEmitter")
+		emitter.Name = "Weather"
+		emitter.EmissionDirection = Enum.NormalId.Bottom
+		emitter.Shape = Enum.ParticleEmitterShape.Box
+		emitter.ShapeStyle = Enum.ParticleEmitterShapeStyle.Surface
+		emitter.Parent = part
+
+		weatherRig.part = part
+		weatherRig.emitter = emitter
+		weatherRig.connection = RunService.RenderStepped:Connect(updateWeatherTransform)
+	end
+
+	weatherRig.height = spec.Height
+
+	local emitter = weatherRig.emitter
+
+	emitter.Texture = spec.Texture
+	emitter.Lifetime = spec.Lifetime
+	emitter.Speed = spec.Speed
+	emitter.Size = spec.Size
+	emitter.Transparency = spec.Transparency
+	emitter.Acceleration = spec.Acceleration
+	emitter.SpreadAngle = spec.SpreadAngle
+	emitter.Orientation = spec.Orientation
+	emitter.Rotation = spec.Rotation
+	emitter.RotSpeed = spec.RotSpeed
+	emitter.Rate = spec.Rate * math.clamp(tonumber(settings.Intensity) or 1, 0, 3)
+	emitter.Color = ColorSequence.new(tableToColor(settings.Color, Color3.new(1, 1, 1)))
+
+	updateWeatherTransform()
+end
+
+for _, child in ipairs(workspace:GetChildren()) do
+	if child.Name == "ScriptMenuWeather" then
+		child:Destroy()
+	end
+end
+
+applyWorldColor()
+applySkybox()
+applyWeather()
+
 if Settings.AutoQueue.Enabled then
 	applyAutoQueue()
 end
@@ -741,6 +1207,193 @@ TripminesGroup:AddToggle("TripmineTeamTrigger", {
 	Callback = function(value)
 		Settings.SubspaceTripmines.TeamTrigger = value
 		saveState(State)
+	end,
+})
+
+local VisualsTab = Tabs.Visuals
+
+local WorldColorGroup = VisualsTab:AddLeftGroupbox("World Color", "palette")
+
+WorldColorGroup:AddToggle("WorldColorEnabled", {
+	Text = "Enabled",
+	Default = Settings.WorldColor.Enabled,
+	Tooltip = "Overrides ambient light, fog, time, and color grading to recolor the map, walls, and buildings.",
+	Callback = function(value)
+		Settings.WorldColor.Enabled = value
+		saveState(State)
+		applyWorldColor()
+	end,
+})
+
+WorldColorGroup:AddLabel("Ambient"):AddColorPicker("WorldColorAmbient", {
+	Title = "Ambient",
+	Default = tableToColor(Settings.WorldColor.Ambient, Color3.fromRGB(128, 128, 128)),
+	Callback = function(color)
+		Settings.WorldColor.Ambient = colorToTable(color)
+		saveState(State)
+		applyWorldColor()
+	end,
+})
+
+WorldColorGroup:AddLabel("Tint"):AddColorPicker("WorldColorTint", {
+	Title = "Tint",
+	Default = tableToColor(Settings.WorldColor.Tint, Color3.new(1, 1, 1)),
+	Callback = function(color)
+		Settings.WorldColor.Tint = colorToTable(color)
+		saveState(State)
+		applyWorldColor()
+	end,
+})
+
+WorldColorGroup:AddLabel("Fog"):AddColorPicker("WorldColorFog", {
+	Title = "Fog",
+	Default = tableToColor(Settings.WorldColor.Fog, Color3.fromRGB(192, 192, 192)),
+	Callback = function(color)
+		Settings.WorldColor.Fog = colorToTable(color)
+		saveState(State)
+		applyWorldColor()
+	end,
+})
+
+WorldColorGroup:AddSlider("WorldColorClockTime", {
+	Text = "Clock Time",
+	Min = 0,
+	Max = 24,
+	Rounding = 1,
+	Default = Settings.WorldColor.ClockTime,
+	Suffix = "h",
+	Callback = function(value)
+		Settings.WorldColor.ClockTime = value
+		saveState(State)
+		applyWorldColor()
+	end,
+})
+
+WorldColorGroup:AddSlider("WorldColorBrightness", {
+	Text = "Brightness",
+	Min = 0,
+	Max = 10,
+	Rounding = 1,
+	Default = Settings.WorldColor.Brightness,
+	Callback = function(value)
+		Settings.WorldColor.Brightness = value
+		saveState(State)
+		applyWorldColor()
+	end,
+})
+
+WorldColorGroup:AddSlider("WorldColorFogEnd", {
+	Text = "Fog End",
+	Min = 0,
+	Max = 10000,
+	Rounding = 10,
+	Default = Settings.WorldColor.FogEnd,
+	Callback = function(value)
+		Settings.WorldColor.FogEnd = value
+		saveState(State)
+		applyWorldColor()
+	end,
+})
+
+WorldColorGroup:AddSlider("WorldColorExposure", {
+	Text = "Exposure",
+	Min = -5,
+	Max = 5,
+	Rounding = 1,
+	Default = Settings.WorldColor.Exposure,
+	Callback = function(value)
+		Settings.WorldColor.Exposure = value
+		saveState(State)
+		applyWorldColor()
+	end,
+})
+
+WorldColorGroup:AddSlider("WorldColorSaturation", {
+	Text = "Saturation",
+	Min = -1,
+	Max = 1,
+	Rounding = 0.05,
+	Default = Settings.WorldColor.Saturation,
+	Callback = function(value)
+		Settings.WorldColor.Saturation = value
+		saveState(State)
+		applyWorldColor()
+	end,
+})
+
+local WeatherGroup = VisualsTab:AddLeftGroupbox("Weather", "cloud-rain")
+
+WeatherGroup:AddToggle("WeatherEnabled", {
+	Text = "Enabled",
+	Default = Settings.Weather.Enabled,
+	Tooltip = "Spawns camera-following particles for your selected weather preset.",
+	Callback = function(value)
+		Settings.Weather.Enabled = value
+		saveState(State)
+		applyWeather()
+	end,
+})
+
+WeatherGroup:AddDropdown("WeatherPreset", {
+	Text = "Preset",
+	Values = WEATHER_OPTIONS,
+	Default = Settings.Weather.Preset,
+	Callback = function(value)
+		Settings.Weather.Preset = value
+		saveState(State)
+		applyWeather()
+	end,
+})
+
+WeatherGroup:AddSlider("WeatherIntensity", {
+	Text = "Intensity",
+	Min = 0.2,
+	Max = 3,
+	Rounding = 0.1,
+	Default = Settings.Weather.Intensity,
+	Callback = function(value)
+		Settings.Weather.Intensity = value
+		saveState(State)
+		applyWeather()
+	end,
+})
+
+WeatherGroup:AddLabel("Color"):AddColorPicker("WeatherColor", {
+	Title = "Color",
+	Default = tableToColor(Settings.Weather.Color, Color3.new(1, 1, 1)),
+	Callback = function(color)
+		Settings.Weather.Color = colorToTable(color)
+		saveState(State)
+		applyWeather()
+	end,
+})
+
+local SkyboxGroup = VisualsTab:AddRightGroupbox("Skybox", "cloud")
+
+if not table.find(SKYBOX_OPTIONS, Settings.Skybox.Preset) then
+	Settings.Skybox.Preset = SKYBOX_OPTIONS[1]
+	State.Skybox.Preset = Settings.Skybox.Preset
+end
+
+SkyboxGroup:AddToggle("SkyboxEnabled", {
+	Text = "Enabled",
+	Default = Settings.Skybox.Enabled,
+	Tooltip = "Replaces the map sky with your selected skybox preset.",
+	Callback = function(value)
+		Settings.Skybox.Enabled = value
+		saveState(State)
+		applySkybox()
+	end,
+})
+
+SkyboxGroup:AddDropdown("SkyboxPreset", {
+	Text = "Preset",
+	Values = SKYBOX_OPTIONS,
+	Default = Settings.Skybox.Preset,
+	Callback = function(value)
+		Settings.Skybox.Preset = value
+		saveState(State)
+		applySkybox()
 	end,
 })
 
